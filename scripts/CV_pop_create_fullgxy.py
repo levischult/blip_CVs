@@ -5,7 +5,7 @@ import astropy.coordinates as apyco
 from scipy.interpolate import interp1d
 import pandas as pd
 import scipy.stats as stats
-
+import legwork as lw
 import paths
 
 
@@ -171,92 +171,265 @@ def sample_kpc_population(max_distance, mu_m1, sigma_m1, sigma_m2):
 
     return dat
 
+def galactic_positions(size, rng, model="McMillan",disk='thick'):                        
+    """Sample a set of Galactic positions of size=size distributed
+    according to the user specified model. X,Y,Z positions in [pc];
+    Galactocentric distance in [kpc]
 
-def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2):
-    
+    This has been adapted to match the normalization assumptions made in the BLIP model.
 
-    # first sample the population
-    # sample the population positions and size based on Pala+2020 distribution & space density
-    # LSS x, y, z returned are in galactocentric cartesian coordinates in kpc
-    # LSS for consistency with Pala, we need to convert Pala samples to galactocentric coords.
-    
-    _ = apyco.galactocentric_frame_defaults.set('latest')
-    print('Galactocentric coordinate default frame:')
-    print(apyco.galactocentric_frame_defaults.get_from_registry('latest'))
+    Parameters
+    ----------
+    size : int
+        Size of the sample
+    model : str
+        Current default model is 'McMillan'
 
-    gxyrad = 2e4 # pc or 20 kpc, this is the radius of the MW
-    print(f'gxyrad {gxyrad} pc')
+    Returns
+    -------
+    xGx, yGx, zGx, inc, OMEGA, omega : array
+        Array of sampled positions in Galactic cartesian coordinates
+        centered on the Galactic center and orientations in radians
     
-    # LSS checking for correct number of sources within 150pc. 
-    # We need at least 42 to match the Pala sample.
+    """
+
+    ## thick/thin switch
+    if disk=='thick':
+        zh = 0.9
+    elif disk=='thin':
+        zh = 0.3
+    else:
+        raise ValueError("disk must be 'thick' or 'thin'.")
+    
+    if model == "McMillan":
+        r_save = []
+        z_save = []
+        # sample double exp func and then rejection sample
+        while len(r_save) < size:
+            rcut = 2.1
+            q = 0.5
+            r0 = 0.075
+            alpha = -1.8
+            rprime = np.sqrt(r**2 + (z/q)**2)
+            ## ensures proper normalization for the rejection sampling
+            rho_c = 0.45
+            rh = 2.9
+            r = rng.uniform(0.2, 20, size * 10)
+            z = rng.uniform(0, 5, size * 10)
+            prob = rng.uniform(0, 1, size * 10)
+            bulge_sample_func = rho_c*np.exp(-(rprime ** 2 ) / rcut ** 2)
+            # bulge_sample_func = 0
+            disk_sample_func = rho_c*np.exp(-r/rh)*np.exp(-np.abs(z)/zh) 
+            actual_func = bulge_sample_func*(1 + rprime / r0)**(alpha) + disk_sample_func
+            (indSave,) = np.where(prob < actual_func)
+            for ii in indSave:
+                r_save.append(r[ii])
+                z_save.append(z[ii])
+        r = np.array(r_save[:size])
+        z = np.array(z_save[:size])
+        ind_pos_neg = rng.uniform(0, 1, len(z))
+        (ind_negative,) = np.where(ind_pos_neg > 0.5)
+        z[ind_negative] = -z[ind_negative]
+
+        # Assign the azimuthal positions:
+        phi = rng.uniform(0, 2 * np.pi, size)
+
+        # convert to cartesian:
+        xGX = r * np.cos(phi)
+        yGX = r * np.sin(phi)
+        zGX = z
+    elif model == "McMillan_fixed":
+        ## this model samplesfrom the McMillan distribution but draws in [x,y,z] cartesian space to avoid singularity at r=0.
+        x_save = []
+        y_save = []
+        z_save = []
+
+        # sample double exp func and then rejection sample
+        while len(z_save) < size:
+            rcut = 2.1
+            q = 0.5
+            r0 = 0.075
+            alpha = -1.8
+            ## ensures proper normalization for the rejection sampling
+            rho_c = 1
+            rh = 2.9
+            x = rng.uniform(-20,20, size * 10)
+            y = rng.uniform(-20,20, size * 10)
+            z = rng.uniform(0, 5, size * 10)
+            r = np.sqrt(x**2 + y**2)
+            prob = rng.uniform(0, 1, size * 10)
+            
+            rprime = np.sqrt(r**2 + (z/q)**2)
+            bulge_sample_func = rho_c*np.exp(-(rprime/rcut)** 2)
+            # bulge_sample_func = 0
+            disk_sample_func = rho_c*np.exp(-r/rh)*np.exp(-np.abs(z)/zh) 
+            actual_func = bulge_sample_func*(1 + rprime / r0)**(alpha) + disk_sample_func
+            (indSave,) = np.where(prob < actual_func)
+            for ii in indSave:
+                x_save.append(x[ii])
+                y_save.append(y[ii])
+                z_save.append(z[ii])
+        x = np.array(x_save[:size])
+        y = np.array(y_save[:size])
+        z = np.array(z_save[:size])
+        ind_pos_neg = rng.uniform(0, 1, len(z))
+        (ind_negative,) = np.where(ind_pos_neg > 0.5)
+        z[ind_negative] = -z[ind_negative]
+
+        xGX = x
+        yGX = y
+        zGX = z
+
+    # assign an inclination, argument of periapsis, and longitude of ascending node
+    inc = np.pi - np.arccos(rng.uniform(-1, 0, size))
+
+    return xGX, yGX, zGX, inc
+
+
+def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):    
+    """sample the MW's CV population, normalized by the Scaringi 2023 1kpc population based on Pala2020 space density measurements.
+
+    Parameters
+    ----------
+    mu_m1 : float
+        mean of the normal distribution to sample the primary mass from
+    sigma_m1 : float
+        standard deviation of the normal distribution to sample the primary mass from
+    sigma_m2 : float
+        standard deviation of the normal distribution to add to the donor mass calculated from the Knigge+2011 table
+    rng : np.random.Generator
+        random number generator
+
+    Returns
+    -------
+    dat : array
+        array of sampled CV population with columns: 
+        m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Pala_reassigned (1 if reassigned to match Pala, 2 if in 150pc sample but not reassigned, 0 otherwise)
+    """
+    
+    # To do, integrate EM gap fill within this function
+    
+    # LSS draw 5e6 galactic positions in galactocentric cartesian coord (kpc) and inclinations.
+    overdraw = int(5e6)
+    # we then normalize by the 1kpc population created in Scaringi 2023.
+    #scaringi1kpc_pop = pd.read_csv(paths.data / "dat_maxDistance_1000_final.txt")
+    #scar_n1kpc = scaringi1kpc_pop.shape[0]
+    scar_n1kpc = 7284
+
+    galcentdef = apyco.galactocentric_frame_defaults.get_from_registry('latest')
+    galcent_sun_dist = galcentdef['parameters']['galcen_distance'].to('kpc').value
+    galcent_z_sun = galcentdef['parameters']['z_sun'].to('kpc').value
+    print(galcent_sun_dist, galcent_z_sun)
+
+    # LSS checking that whatever draw is made has 42 sources within 150 pc (after normalization) to match Pala sample.
     ind_check = []
-    while len(ind_check) < 42:
-        # LSS sampling over whole gxy assuming uniform space density with exp decay in height and uniform in disk.
-        x, y, z = sample_position_from_Pala_2020(rho_0=4.8e-6, h=280, dist_max=gxyrad) 
-        # LSS note that dist_max is in pc, but x, y, z are returned in kpc.
+    while len(ind_check) < scar_n1kpc:
+        print("Drawing galactic positions...")
+        xgalcent, ygalcent, zgalcent, inc = galactic_positions(overdraw, rng, model="McMillan_fixed",disk='thick')
+        dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
+        
+        # LSS astropy galactocentric coordinates assume 8.122 kpc for distance to gal center (origin of galcent)
+        # LSS and z_sun = 20.8 pc. Sun is along x-axis. Lets find all systems within 1kpc of sun.
+        draw_n1kpc = np.sum(dist_from_sun < 1)
 
-        # LSS converting from galactocentric cartesian to galactic cartesian to check distance from sun. 
-        c_galcent = SkyCoord(x, y, z, unit=u.kpc, frame='galactocentric', representation_type='cartesian')
-        c_gal = c_galcent.transform_to(apyco.Galactic)
-        ind_check, = np.where(c_gal.distance < 0.15 * u.kpc)    # LSS this may need by hand c_gal.x**2 etc
+        # LSS get normalizing factor and downsample the drawn pop to an accurate density of CV systems
+        normfactor = scar_n1kpc / draw_n1kpc
+        downsamp_ind = np.random.choice(overdraw, int(overdraw*normfactor), replace=False)
+        xgalcent = xgalcent[downsamp_ind]
+        ygalcent = ygalcent[downsamp_ind]
+        zgalcent = zgalcent[downsamp_ind]
+        inc = inc[downsamp_ind]
+        # LSS recalc distance post downsample
+        dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
+        ind_check, = np.where(dist_from_sun<1)
+        print('Not enough sources within 1 kpc, redrawing population...')
 
-    # d = np.sqrt(x**2 + y**2 + z**2) * u.kpc
-    # ind_check, = np.where(d<0.15*u.kpc)
-    # while len(ind_check) < 42:
-    #     print("We need at least 42 sources within 150pc. Generating new population!")
-    #     x, y, z = sample_position_from_Pala_2020(rho_0=4.8e-6, h=280, dist_max=max_distance)
-    #     d = np.sqrt(x**2 + y**2 + z**2) * u.kpc
-    #     ind_check, = np.where(d<0.15*u.kpc)
-
-    # assign a random inclination
-    inclination = np.arccos(np.random.uniform(-1, 1, len(c_gal.cartesian.x)))
+    draw_n1kpc = np.sum(dist_from_sun < 1)
+    print(f"Number of sources within 1 kpc after downsampling: {draw_n1kpc}")
+    print(f"Difference between draw and Scaringi 1kpc pop after downsampling: {draw_n1kpc - scar_n1kpc}")
+    print(f'This is a {100*(draw_n1kpc - scar_n1kpc)/scar_n1kpc:.2f}% difference.')
     
     # sample the primary mass with normal distribution supplied by user
-    m1 = np.random.normal(loc=mu_m1, scale=sigma_m1, size=len(c_gal.cartesian.x))
+    m1 = np.random.normal(loc=mu_m1, scale=sigma_m1, size=len(xgalcent))
     
     # get the orbital periods by sampling from the Pala+2020 table
-    porb = sample_porb_from_Pala_2020(nCV=len(c_gal.cartesian.x))
+    porb = sample_porb_from_Pala_2020(nCV=len(xgalcent))
     f_gw = 2/(porb * 3600) # this is simple because the binaries are circular and porb is in hrs
 
     # get the matching donor mass from the Knigge+2011 table
     m2 = calculate_m2_from_porb(porb)
-    m2_err = np.random.normal(loc=0, scale=sigma_m2, size=len(c_gal.cartesian.x))
+    m2_err = np.random.normal(loc=0, scale=sigma_m2, size=len(xgalcent))
     m2 = m2 + m2_err
-    Pala_reassign = np.zeros(len(c_gal.cartesian.x))
-    dat = np.vstack([m1, m2, f_gw, inclination, c_gal.cartesian.x.value, c_gal.cartesian.y.value, c_gal.cartesian.z.value, Pala_reassign]).T
+    Pala_reassign = np.zeros(len(xgalcent))
+    scar_reassign = np.zeros(len(xgalcent))
+    dist_from_sun = np.zeros(len(xgalcent))
+    dat = np.vstack([m1, m2, f_gw, inc, xgalcent, ygalcent, zgalcent, scar_reassign, Pala_reassign, dist_from_sun]).T
 
-    # next reassign some of the sources to match the Pala data exactly
-    m1_P, m2_P, porb_P, x_P, y_P, z_P, inc_P = get_Pala_sample(mu_m1, sigma_m1, sigma_m2)
+    # next reassign some of the sources to match the Scaringi data exactly
+    scaringi1kpc_pop = pd.read_csv(paths.data / "dat_maxDistance_1000_final.txt")
+    # m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Pala_reassigned (1 if reassigned to match Pala, 2 if in 150pc sample but not reassigned, 0 otherwise)
+
+    m1_S, m2_S, fgw_S, inc_S, x_S, y_S, z_S, P_r = scaringi1kpc_pop.iloc[:,:].values.T
     
-    d = np.sqrt(dat[:,4]**2 + dat[:,5]**2 + dat[:,6]**2) * u.kpc
-    ind_150, = np.where(d<0.15*u.kpc)
+    dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
+    ind_1kpc, = np.where(dist_from_sun<1) # LSS finding the sources within 1 kpc for reassignment to Scaringi pop.
+    print(len(ind_1kpc), "sources within 1 kpc available for reassignment to Scaringi sample.") 
 
-    # Some haking required here. Pala sample is 42 sources, so we need to randomly select 42 sources
+    # Some hacking required here. Pala sample is 42 sources, so we need to randomly select 42 sources
     # from the 150pc sample and replace with the Pala sample.
     # But we also need to make sure that we don't replace the same source twice.
-    ind_Pala = np.random.choice(ind_150, len(m2_P), replace=False)   
-    dat[ind_150, 7] = 2*np.ones(len(ind_150))
+    ind_scar = np.random.choice(ind_1kpc, len(m2_S), replace=False)   
+    dat[ind_1kpc, 7] = 2*np.ones(len(ind_1kpc)) # LSS flagging any that are within 1kpc but do not get reassigned as 2.
 
-    dat[ind_Pala, 0] = m1_P
-    dat[ind_Pala, 1] = m2_P
-    dat[ind_Pala, 2] = 2/(porb_P*3600)
-    dat[ind_Pala, 3] = inc_P
-    dat[ind_Pala, 4] = x_P
-    dat[ind_Pala, 5] = y_P
-    dat[ind_Pala, 6] = z_P
-    dat[ind_Pala, 7] = np.ones(len(m1_P))
-    
-    ind, = np.where(dat[:,7] > 0)
+    dat[ind_scar, 0] = m1_S
+    dat[ind_scar, 1] = m2_S
+    dat[ind_scar, 2] = fgw_S
+    dat[ind_scar, 3] = inc_S
+    dat[ind_scar, 4] = x_S
+    dat[ind_scar, 5] = y_S
+    dat[ind_scar, 6] = z_S
+    dat[ind_scar, 7] = np.ones(len(m1_S)) # LSS any that got reassigned to scaringi data is 1
+    dat[ind_scar, 8] = P_r # LSS same rules with Pala 42 sources / 150 pc -- 2=within 150 pc, 1=w/i 150pc and reassigned to a Pala source.
 
-    final_c_gal = SkyCoord(dat[:, 4], dat[:, 5], dat[:, 6], unit=u.kpc, frame='galactic', representation_type='cartesian')
-    
-    final_c_galcent = final_c_gal.transform_to('galactocentric')
-    
-    dat[:, 4] = final_c_galcent.x.value
-    dat[:, 5] = final_c_galcent.y.value
-    dat[:, 6] = final_c_galcent.z.value
-
+    dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
+    dat[:, 9] = dist_from_sun
     return dat
+
+def convert_popsynth_to_blipreadable(input_loc, output_loc):
+    """ Converts population file to blip readable format with columns f, h, lat, long.
+
+    Parameters
+    ----------
+    input_loc : str
+        Location of the input file containing the population synthesis data.
+    output_name : str
+        Name of the output file to save the converted data in blip readable format.
+    """
+    file = input_loc
+    binaries = pd.read_csv(file)
+    blip_columns = ['f','h','lat','long']
+    xG, yG, zG = binaries[' x_galcent[kpc]'].to_numpy(), binaries[' y_galcent[kpc]'].to_numpy(), binaries[' z_galcent[kpc]'].to_numpy()
+    ## convert to distances and lat/long ecliptic coords
+    gc = apyco.SkyCoord(x=xG*u.kpc,y=yG*u.kpc,z=zG*u.kpc, frame='galactocentric')
+    SSBc = gc.transform_to(apyco.BarycentricMeanEcliptic)
+
+    ## get latitude, longitude
+    lat = SSBc.lat.to(u.rad).value
+    long = SSBc.lon.to(u.rad).value
+
+    ## making sure we've handled our coordinate transforms correctly
+    dist = SSBc.distance.to(u.kpc)
+    mc = lw.utils.chirp_mass(binaries['# m1[Msun]'],binaries[' m2[Msun]']).to_numpy()*u.Msun
+    fs = binaries[' f_gw[Hz]'].to_numpy()
+    f_orb = fs*u.Hz/2
+    ## assuming circular binaries
+    ecc = np.zeros(len(f_orb))
+
+    hs = lw.strain.h_0_n(mc,f_orb,ecc,2,dist)
+
+    blip_df = pd.DataFrame(data=np.vstack((fs,hs.flatten(),lat,long)).T,columns=blip_columns)
+
+    blip_df.to_csv(output_loc, index=False,sep=' ',header=False)
 
 
 
@@ -271,12 +444,12 @@ if __name__ == '__main__':
 
     # FIX A SEED TO REPRODUCE THE SAMPLE
     rseed = 42
-    np.random.seed(rseed)
+    rngen = np.random.default_rng(rseed)
 
-    dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2)
+    dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rngen)
     print('Sampled population size:', len(dat))
     # save the data
-    np.savetxt(paths.lssdata / f"dat_fullgxy_rs{rseed}_final.txt", dat, delimiter=',', header="m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Pala_reassigned", fmt='%.10f')
+    np.savetxt(paths.lssdata / f"dat_fullgxy_rs{rseed}_final.txt", dat, delimiter=',', header="m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Scar_reassigned, Pala_reassigned, dist_from_sun[kpc]", fmt='%.10f')
     
     c_galcent = SkyCoord(dat[:, 4], dat[:, 5], dat[:, 6], unit=u.kpc, frame='galactocentric', representation_type='cartesian')
 
