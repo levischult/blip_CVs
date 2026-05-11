@@ -2,12 +2,16 @@ import numpy as np
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 import astropy.coordinates as apyco
+import astropy.constants as apyconst
 from scipy.interpolate import interp1d
 import pandas as pd
-import scipy.stats as stats
+from scipy import stats
 import legwork as lw
 import paths
-
+from sklearn.neighbors import KernelDensity
+from sklearn.model_selection import GridSearchCV
+import matplotlib.pyplot as plt
+import healpy as hp
 
 
 def sample_porb_from_Pala_2020(nCV):
@@ -325,7 +329,7 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
     ind_check = []
     while len(ind_check) < scar_n1kpc:
         print("Drawing galactic positions...")
-        xgalcent, ygalcent, zgalcent, inc = galactic_positions(overdraw, rng, model="McMillan_fixed",disk='thick')
+        xgalcent, ygalcent, zgalcent, inc = galactic_positions(overdraw, rng, model="McMillan_fixed",disk='thin')
         dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
         
         # LSS astropy galactocentric coordinates assume 8.122 kpc for distance to gal center (origin of galcent)
@@ -431,62 +435,395 @@ def convert_popsynth_to_blipreadable(input_loc, output_loc):
 
     blip_df.to_csv(output_loc, index=False,sep=' ',header=False)
 
+def cvpop_frequency_hist_noEMedge(cvpop, freqcolname=' f_gw[Hz]', plot=True):
+    """
+    Create a histogram of CV population in freq. avoid edge effects before EM gap.
+
+    Parameters
+    ----------
+    cvpop : DataFrame
+        DataFrame containing CV population data.
+    freqcolname : str, optional
+        Column name for frequency in the CV population DataFrame
+        (default is ' f_gw[Hz]').
+
+    Returns
+    -------
+    counts : array
+        Array of counts in each frequency bin.
+    bins : array
+        Array of bin edges for the frequency histogram. shape N+1 for N bins.
 
 
+    """
+    # LSS bin up the CV population to find EM gap
+    # LSS we don't want edge effects, so this little loop decreases the number of bins
+    # LSS until the lowest freq bin before the EM gap has the most CVs before the gap.
+    # LSS edge effects can create a step down into the EM gap that isn't super accurate.
+    edgects = -1 # LSS get us started
+    counts, bins = np.histogram(cvpop[freqcolname], bins='auto')
+    nbns = len(bins)-1
+    while edgects < 0:
+        counts, bins = np.histogram(cvpop[freqcolname], bins=nbns)
+        emgapinds = np.where(counts == 0)[0]
+        edgects = counts[emgapinds[0]-1] - counts[emgapinds[0]-2]
+        if edgects < 0:
+            print('Edge effects found! removing 1 bin')
+            nbns -= 1
+
+    print('Final number of freq bins for CV population:', nbns)
+
+    if plot:
+        plt.stairs(counts, bins)
+        plt.xlabel('Frequency [Hz]')
+        plt.ylabel('Count')
+        plt.title('CV Population Frequency Distribution')
+        plt.savefig(paths.lssfigs / 'cvpop_freq_hist_noEMedge.png', dpi=300, bbox_inches='tight', format='png')
+
+    return counts, bins
+
+
+
+def dNdmchirp(cvpop, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2colname=' m2[Msun]', plot=True):
+    """
+    Create chirp mass distribution from given CV population using KDE.
+
+    Nbins is used to bin the CVs according to frequency, this function then 
+    finds the frequency bin with the most CVs before the EM freq gap and 
+    uses the CVs in that bin to form a chirp mass distribution using a KDE. This distribution
+    is then returned as an interpolation function and can be used to fill the 
+    missing CV population in the EM gap using the N_CVs_gwevol function.
+
+    Parameters
+    ----------
+    cvpop : DataFrame
+        DataFrame containing CV population data.
+    freqcolname : str, optional
+        Column name for frequency in the CV population DataFrame 
+        (default is ' f_gw[Hz]').
+    mass1colname : str, optional
+        Column name for primary mass in the CV population DataFrame
+        (default is '# m1[Msun]').
+    mass2colname : str, optional
+        Column name for secondary mass in the CV population DataFrame
+        (default is ' m2[Msun]').
+
+    Returns
+    -------
+    mc_interp : scipy.interpolate.interp1d (function)
+        Interpolation of chirp mass distribution at lowest frequency bin.
+        to get value at mchirp_val, use mc_interp(mchirp_val).
+    """
+    counts, bins = cvpop_frequency_hist_noEMedge(cvpop, freqcolname, plot=False)
+
+    df = bins[1]-bins[0]
+    emgap_inds = np.where(counts==0)[0] # LSS get indices of EM gap
+
+    # LSS 20260129 - getting f bin with most CVs before gap. 
+    # some CVs may have detached already and are not visible in the lowest freq bin before EM gap.
+    fprime_ind = np.argmax(counts[:emgap_inds[0]])
+    fprime = bins[fprime_ind]
+    
+    # LSS get the CVs in fprime
+    fprime_CVs_ind = np.where((cvpop[freqcolname]>bins[fprime_ind]) &
+                    (cvpop[freqcolname]<bins[fprime_ind]+df))[0]
+    
+    #print('N CVs in fprime bin:', fprime_CVs_ind.shape[0])
+    fprime_CVs = cvpop.iloc[fprime_CVs_ind]
+    
+    # LSS check that we recovered the right number of CVs
+    if fprime_CVs_ind.shape[0] != counts[fprime_ind]:
+        print(f'{fprime_CVs_ind.shape[0]=}, {counts[fprime_ind]=}')
+        raise Exception('Number of CVs in fprime bin does not match histogram count!')
+
+    fprime_mc = lw.utils.chirp_mass(fprime_CVs[mass1colname] * u.Msun, fprime_CVs[mass2colname] * u.Msun)
+    
+    kern = 'gaussian'
+    
+    bwrange = np.linspace(1e-4, 1e-1, 1000) 
+    K = 20 # Do 20-fold cross validation
+    grid = GridSearchCV(KernelDensity(kernel=kern), {'bandwidth': bwrange}, cv=K) 
+    
+    # LSS find optimal bandwidth based on chirp mass distribution at fprime
+    grid.fit(np.array(fprime_mc)[:, None]) 
+    h_opt = grid.best_params_['bandwidth']
+    print(f"Optimal bandwidth for chirp mass KDE at lowest frequency bin before EM gap: {h_opt}")
+
+    # LSS make KDE over range of chirp masses in fprime bin
+    mc_range = np.linspace(min(fprime_mc), max(fprime_mc), 100)
+    mc_kde = KernelDensity(kernel=kern, bandwidth=h_opt).fit(np.array(fprime_mc)[:, None])
+
+    # LSS get log density values from KDE
+    log_dens = mc_kde.score_samples(mc_range[:, None])
+    
+    # normalize and return 0 if chirp mass out of interpolation range
+    mc_interp = interp1d(mc_range, np.exp(log_dens)/np.sum(np.exp(log_dens)), fill_value=0, bounds_error=False)
+    
+    if plot:
+        plt.hist(fprime_mc, bins='auto', histtype='step', density=True, label=f'Chirp Mass Distribution at fprime: {fprime:.1e} Hz');
+        plt.plot(mc_range, np.exp(log_dens), label=f'Gaussian KDE, BW={h_opt:.1e}')
+        plt.title('CV Chirp Mass Distribution before EM Gap', fontsize='xx-large')
+        plt.xlabel(r'Chirp Mass [$M_{\odot}$]')
+        plt.legend()
+        plt.savefig(paths.lssfigs / 'cvpop_chirp_mass_kde.png', dpi=300, bbox_inches='tight', format='png')
+
+    return mc_interp, mc_range
+
+
+def N_CVs_gwevol(cvpop, freqcolname=' f_gw[Hz]', plot=True):
+    """
+    Calculate the number of CVs at given frequencies assuming only GW evolution.
+
+    This function assumes the chirp mass distribution is the same as that at the
+    frequency bin with the most CVs before the EM freq gap.
+
+    Parameters
+    ----------
+    f : array
+        array of frequencies in Hz. Must include fprime (freq with most CVs before EM gap) 
+        as first frequency to ensure proper normalization.
+    mchirp : array
+        array of chirp masses in solar masses
+    
+    Returns
+    -------
+    N : array
+        number of CVs at each frequency (summed over chirp mass)
+    """
+    # LSS get freq binning of CV pop
+    counts, fbins = cvpop_frequency_hist_noEMedge(cvpop, freqcolname)
+
+    # LSS determine frequency and chirp mass ranges over which to fill the 2D distribution
+    emgap_inds = np.where(counts==0)[0] # LSS get indices of EM gap
+    fprime_ind = np.argmax(counts[:emgap_inds[0]])
+    # LSS here we want to include the first populated bin on high freq edge 
+    # of the emgap in case there are edge effects at top of emgap and 
+    # we need to fill into that region. So we take +1 (the filled high freq bin)
+    # and +1 the right edge of that bin to make sure we include the whole bin 
+    # in the filling region.
+    fprime_and_fgap = fbins[fprime_ind:emgap_inds[-1]+2]
+    dNdmc_func, mc_range = dNdmchirp(cvpop)
+
+    # LSS get df and dm for converting later density to number
+    df = fbins[1]-fbins[0]
+    dm = mc_range[1]-mc_range[0]
+
+    # LSS create meshgrid from input arrays
+    Fgrid, Mgrid = np.meshgrid(fbins, mc_range)
+
+    # See eqn A2 of Nissanke et al. 2012
+    # G, c in m, s, kg
+    dfdt_fact = (96/5)*np.pow(np.pi, -8/3)*np.pow(apyconst.G.value, -5/3)*np.pow(apyconst.c.value, 5)
+
+    # LSS convert chirp mass from solar masses to kg
+    mc_kg = Mgrid * apyconst.M_sun.value
+    dfdt_vars = np.pow(mc_kg, 5/3)*np.pow(Fgrid, 11/3)
+    dtdf = (dfdt_fact*dfdt_vars)**-1
+
+    # LSS get chirp mass distribution based on input binning of CV population
+    dNdmc = dNdmc_func(Mgrid)
+    
+    # LSS calculate normalization via number in fprime bin
+    normfact = counts[fprime_ind] / np.sum(dtdf[:, 0] * dNdmc[:, 0] * df * dm)
+
+    # LSS sanity check with normalization
+    tstNfprime = np.sum(dtdf[:, 0] * dNdmc[:, 0] * normfact * df * dm)
+    if np.round(tstNfprime) != counts[fprime_ind]:
+        print(f'{tstNfprime=}, {counts[fprime_ind]=}')
+        raise Exception("Normalization check failed: calculated number in fprime bin does not match histogram count!")
+
+    fspace = fprime_and_fgap
+    N = dtdf * dNdmc * normfact * df * dm
+    np.save(paths.lssdata / 'N_gwevol_unsmoothed.npy', N)
+    if plot:
+        plt.imshow(N, aspect='auto', origin='lower', extent=[fprime_and_fgap[0], fprime_and_fgap[-1],
+                                                            mc_range[0], mc_range[-1]],)
+        plt.xlabel('Frequency [Hz]')
+        plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
+        plt.title('N_gwevol Unsmoothed')
+        plt.savefig(paths.lssfigs / 'N_gwevol_unsmoothed.png', dpi=300, bbox_inches='tight', format='png')
+
+    # LSS since this joint distribution could be coarser in frequency, smooth a bit 
+    # with a linear interpolation
+    if N.shape[1] > N.shape[0]:
+        print('Smoothing N_gwevol in frequency with linear interpolation...')
+        Ndist_finterp = np.zeros((N.shape[0], N.shape[0]))
+        fspace = np.linspace(fprime_and_fgap[0], fprime_and_fgap[-1], 100)
+        for a in range(N.shape[0]):
+            fint = interp1d(fprime_and_fgap,  N[a,:], fill_value=0, bounds_error=False)
+            Ndist_finterp[a,:] = fint(fspace)
+        np.save(paths.lssdata / 'N_gwevol_smoothed.npy', Ndist_finterp)
+        if plot:
+            plt.imshow(Ndist_finterp, aspect='auto', origin='lower', extent=[fspace[0], fspace[-1],
+                                                            mc_range[0], mc_range[-1]],)
+            plt.xlabel('Frequency [Hz]')
+            plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
+            plt.title('N_gwevol Smoothed in Frequency')
+            plt.savefig(paths.lssfigs / 'N_gwevol_smoothed.png', dpi=300, bbox_inches='tight', format='png')
+        N = Ndist_finterp
+
+    # LSS lets normalize N to prepare for rejection sampling.
+    N = N/np.sum(N)
+
+    return N, fspace, mc_range
+
+def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, plot=True):
+    """Simple rejection sampling to fill the EM gap based on the N_gwevol distribution.
+
+    Parameters
+    ----------
+    N : array
+        2D normalized joint distribution of number of CVs as a function of frequency and chirp mass.
+    fspace : array
+        array of frequencies corresponding to the columns of N. shape (Nf,)
+    mc_range : array
+        array of chirp masses corresponding to the rows of N. shape (Nmc,)
+    seednum : int
+        seed for random number generator
+    nsamples : int
+        number of samples to generate
+
+    Returns
+    -------
+    truepts : array
+        array of shape (nsamples, 2) containing the frequency and 
+        chirp mass of the sampled points in the supplied EM gap distribution.
+    """
+    np.random.seed(seednum)
+
+    randmc = np.random.uniform(low=mc_range[0], high=mc_range[-1], size=nsamples)
+    randf = np.random.uniform(low=fspace[0], high=fspace[-1], size=nsamples)
+    randnum = np.random.uniform(low=0, high=1, size=nsamples)
+
+    truepts = []
+
+    while len(truepts) < nsamples:
+        randmc = np.random.uniform(low=mc_range[0], high=mc_range[-1])
+        randf = np.random.uniform(low=fspace[0], high=fspace[-1])
+        randnum = np.random.uniform(low=0, high=1)
+        f_idx = np.argmin(np.abs(fspace-randf))
+        m_idx = np.argmin(np.abs(mc_range-randmc))
+        if randnum < N[m_idx, f_idx]:
+            truepts.append([randf, randmc])
+
+    truepts = np.array(truepts)
+    np.save(paths.lssdata / f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.npy', truepts)
+    if plot:
+        plt.scatter(truepts[:,0], truepts[:,1], s=1, c='w' alpha=0.5)
+        plt.imshow(N, aspect='auto', origin='lower', extent=[fspace[0], fspace[-1], mc_range[0], mc_range[-1]], alpha=0.7)
+        plt.xlabel('Frequency [Hz]')
+        plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
+        plt.title(f'Rejection Sampled EM Gap, {nsamples} samples')
+        plt.savefig(paths.lssfigs / f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.png', dpi=300, bbox_inches='tight', format='png')
+    
+    return truepts
 
 if __name__ == '__main__':
     
     ## THESE ARE FIXED FOR THIS STUDY
-    max_distance = 20000 # pc or 20 kpc, this is the radius of the MW
+    #max_distance = 20000 # pc or 20 kpc, this is the radius of the MW
     mu_m1 = 0.7
     sigma_m1 = 0.001
     sigma_m2 = 0.001
 
     # FIX A SEED TO REPRODUCE THE SAMPLE
-    rseed = 42
+    rseed = 170817
     rngen = np.random.default_rng(rseed)
+    np.random.seed(rseed)
 
     dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rngen)
     print('Sampled population size:', len(dat))
+    popdatcolnames = ['m1[Msun]', 'm2[Msun]', 'f_gw[Hz]', 'inclination[rad]', 'x_galcent[kpc]', 'y_galcent[kpc]', 'z_galcent[kpc]', 'Scar_reassigned', 'Pala_reassigned', 'dist_from_sun[kpc]']
     # save the data
     np.savetxt(paths.lssdata / f"dat_fullgxy_rs{rseed}_final.txt", dat, delimiter=',', header="m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Scar_reassigned, Pala_reassigned, dist_from_sun[kpc]", fmt='%.10f')
     
-    c_galcent = SkyCoord(dat[:, 4], dat[:, 5], dat[:, 6], unit=u.kpc, frame='galactocentric', representation_type='cartesian')
+    # LSS now we need to fill the EM gap
+    # first we find joint freq/chirp mass dist for CVs in emgap according to GR
+    # LSS N is the joint probability distribution of CVs in the f, mc space through the EM gap.
+    # LSS fspace and mc_range are the corresponding frequencies and chirp masses
+    # for the rows and columns of N.
+    N, fspace, mspace = N_CVs_gwevol(dat)
+
+    # rejection sample this distribution
+    numsamp = int(1e4)
+    # LSS pts will have shape (numsamp, 2) with columns f and mchirp
+    pts = rejection_sample_emgap(N, fspace, mspace, seednum=rseed, nsamples=numsamp)
+
+    # then we need to normalize according to the number of CVs in the 
+    # lowest freq bin just before the EM gap.
+    counts, bns = cvpop_frequency_hist_noEMedge(dat, plot=False)
+    emg_cts, _ = np.histogram(pts[:, 0], bins=bns) # LSS getting counts of EM gap draws 
+    num_normfactor = emg_cts/counts
+    num_normfactor[~np.isfinite(num_normfactor)] = 0 # set inf values to 0
+    num_normfactor = num_normfactor[np.where(num_normfactor > 0)[0][0]]
+
+    # LSS how many pts do we need to draw to match the number in gxy
+    normdraws = pts.shape[0]/num_normfactor 
+    # LSS downsample
+    dwnsamp_pts = pts[np.random.choice(pts.shape[0], int(normdraws), replace=True)]
+    emgap_inds = np.where(counts==0)[0] 
+    fprime_ind = np.argmax(counts[:emgap_inds[0]])
+    fprime = bns[fprime_ind]
+    df = bns[1]-bns[0]
+    # LSS only keep points drawn within the EM gap (above fprime + df)
+    dwnsamp_pts_emgap = dwnsamp_pts[dwnsamp_pts[:,0]>fprime+df]
+    plt.hist(counts, bins=bns, histtype='step', label='CV population')
+    plt.hist(dwnsamp_pts[:, 0], bins=bns, histtype='step', label='Rejection Sampled Points')
+    plt.hist(dwnsamp_pts_emgap[:, 0], bins=bns, histtype='step', label='Rejection Sampled Points in EM gap')
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('Number of CVs')
+    plt.legend()
+    plt.savefig(paths.lssfigs / f'cvfullgxy_emg_filled_rseed{rseed}_nsamp{numsamp}_freq_hist.png', dpi=300, bbox_inches='tight', format='png')
+
+    # then we need to assign galactic positions to CVs in EM gap.
+    xgalcent, ygalcent, zgalcent, inc = galactic_positions(len(dwnsamp_pts_emgap), rngen, model="McMillan_fixed", disk='thin')
+    # LSS plot a comparison skymap of positions
+    cvgxy_galcentco = apyco.SkyCoord(x=dat[:, popdatcolnames.index('x_galcent[kpc]')]*u.kpc, y=dat[:, popdatcolnames.index('y_galcent[kpc]')]*u.kpc, z=dat[:, popdatcolnames.index('z_galcent[kpc]')]*u.kpc, frame='galactocentric', representation_type='cartesian')
+    emgap_galcentco = apyco.SkyCoord(x=xgalcent*u.kpc, y=ygalcent*u.kpc, z=zgalcent*u.kpc, frame='galactocentric', representation_type='cartesian')
+    cvgxy_SSBc = cvgxy_galcentco.transform_to(apyco.BarycentricMeanEcliptic)
+    emgap_SSBc = emgap_galcentco.transform_to(apyco.BarycentricMeanEcliptic)
+    cvgxy_lat = cvgxy_SSBc.lat.to(u.rad).value
+    cvgxy_lon = cvgxy_SSBc.lon.to(u.rad).value
+    emgap_lat = emgap_SSBc.lat.to(u.rad).value
+    emgap_lon = emgap_SSBc.lon.to(u.rad).value
+    hp.mollview(coord='E')
+    hp.projscatter(emgap_lon*u.rad.to(u.deg),emgap_lat*u.rad.to(u.deg),lonlat=True,color='r',alpha=0.5,s=10, label='EM gap CVs')
+    hp.projscatter(cvgxy_lon*u.rad.to(u.deg),cvgxy_lat*u.rad.to(u.deg),lonlat=True,color='k',alpha=0.5,s=4, label='CV Population')
+    plt.legend()
+    plt.savefig(paths.lssfigs / f'cvfullgxy_emg_rseed{rseed}_nsamp{numsamp}_skymap.png', dpi=300, bbox_inches='tight', format='png')
 
 
-    # Reparameterize and print files in format needed for LISA codes
-    
-    # Get source positions in ecliptic spherical coordinates
-    c_barytrueec_GW = c_galcent.transform_to('barycentrictrueecliptic')
-    c_barytrueec_GW.representation_type='spherical'
+    # LSS save emgap CVs to a file
+    emgap_dat = np.hstack((dwnsamp_pts_emgap, xgalcent[:, None], ygalcent[:, None], zgalcent[:, None], inc[:, None]))
+    np.savetxt(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp}_final.txt", emgap_dat, delimiter=',', header="f_gw[Hz], Mchirp[Msun], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], inclination[rad]", fmt='%.10f')
 
-    # some constants for unit conversions
-    MSUN   = 4.9169e-6 #mass of sun [s]
-    CLIGHT = 299792458 #speed of light [m/s]
-    PARSEC_2_METERS=3.0856775807e16 #parsec [m]
+    # LSS convert everything to a BLIP readable format.
+    blip_columns = ['f','h','lat','long']
 
-    # name parameters meaningfully to make equations readable
-    m1    = dat[:,0]
-    m2    = dat[:,1]
-    f0    = dat[:,2] # LSS f_GW
-    iota  = dat[:,3]
-    fdot  = f0*0 # LSS monochromatic 
-    theta = c_barytrueec_GW.lat.to(u.rad).value
-    phi   = c_barytrueec_GW.lon.to(u.rad).value
-    dL    = c_barytrueec_GW.distance.to(u.kpc).value
-    
-    # get GW ampolitude
-    M    = m1+m2 #total mass
-    eta  = m1*m2/M/M #symmetric mass ratio
-    Mc   = M*(eta**(3/5)) #chirp mass
-    A_gw = 2*((Mc*MSUN)**(5) * (np.pi*f0)**2)**(1/3)/(dL*1000*PARSEC_2_METERS/CLIGHT) #gw amplitude
-    
-    # phase parameters are random
-    phase        = np.random.uniform(0, 2 * np.pi, len(m1)) #initial phase
-    polarization = np.random.uniform(0, np.pi, len(m1)) #polarization angle
+    ## making sure we've handled our coordinate transforms correctly
+    cvgxy_dist = cvgxy_SSBc.distance.to(u.kpc)
+    emgap_dist = emgap_SSBc.distance.to(u.kpc)
+    cvgxy_mc = lw.utils.chirp_mass(dat[:, popdatcolnames.index('m1[Msun]')], dat[:, popdatcolnames.index('m2[Msun]')]).to_numpy()*u.Msun
+    emgap_mc = dwnsamp_pts_emgap[:, 1]*u.Msun # LSS this is already the chirp mass
+    cvgxy_fs = dat[:, popdatcolnames.index('f_gw[Hz]')]
+    cvgxy_f_orb = cvgxy_fs*u.Hz/2
+    emgap_fs = dwnsamp_pts_emgap[:, 0]
+    emgap_f_orb = emgap_fs*u.Hz/2
+    ## assuming circular binaries
+    cvgxy_ecc = np.zeros(len(cvgxy_f_orb))
+    emgap_ecc = np.zeros(len(emgap_f_orb))
 
-    # save the data
-    # NOTE: %.10f does not print enough digits for the GW amplitude. Use %.10e instead.
-    dat_gw = np.vstack([f0,fdot,np.cos(np.pi/2 - theta),phi,A_gw,iota,polarization,phase]).T
-    #header="f[Hz], fdot[Hz/s], cos colat, lon[rad], Amp, inc[rad], pol[rad], phase[rad]"
-    np.savetxt(paths.lssdata / f"dat_fullgxy_rs{rseed}_GW_final.txt", dat_gw, delimiter=' ', fmt='%.10e') #no header to make it easier to add to the full galaxy file
+    cvgxy_hs = lw.strain.h_0_n(cvgxy_mc,cvgxy_f_orb,cvgxy_ecc,2,cvgxy_dist)
+    emgap_hs = lw.strain.h_0_n(emgap_mc,emgap_f_orb,emgap_ecc,2,emgap_dist)
+
+    cvgxy_blip_df = pd.DataFrame(data=np.vstack((cvgxy_fs,cvgxy_hs.flatten(),cvgxy_lat,cvgxy_lon)).T,columns=blip_columns)
+    emgap_blip_df = pd.DataFrame(data=np.vstack((emgap_fs,emgap_hs.flatten(),emgap_lat,emgap_lon)).T,columns=blip_columns)
+    cvgxy_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_rs{rseed}_nsamp{numsamp}_BLIP_final.txt", index=False,sep=' ',header=False)
+    emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp}_BLIP_final.txt", index=False,sep=' ',header=False)
+
+    combined_fs = np.hstack((cvgxy_fs, emgap_fs))
+    combined_hs = np.hstack((cvgxy_hs.flatten(), emgap_hs.flatten()))
+    combined_lat = np.hstack((cvgxy_lat, emgap_lat))
+    combined_lon = np.hstack((cvgxy_lon, emgap_lon))
+    cvgxy_emgap_blip_df = pd.DataFrame(data=np.vstack((combined_fs,combined_hs,combined_lat,combined_lon)).T,columns=blip_columns)
+    cvgxy_emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_combined_rs{rseed}_nsamp{numsamp}_BLIP_final.txt", index=False,sep=' ',header=False)
