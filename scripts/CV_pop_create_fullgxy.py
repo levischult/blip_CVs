@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import healpy as hp
 
 
-def sample_porb_from_Pala_2020(nCV):
+def sample_porb_from_Pala_2020(nCV, rng):
     lpdist = pd.read_csv(paths.data / "lpdist3.out", delim_whitespace=True, header=None, names=['logp', 'CDF'])
 
 
@@ -25,13 +25,13 @@ def sample_porb_from_Pala_2020(nCV):
     #lpdist['CDF'] = scipy.ndimage.gaussian_filter1d(lpdist['CDF'], 2)
 
     # sample from the CDF
-    pp = np.random.uniform(0, 1, nCV)
+    pp = rng.uniform(0, 1, nCV)
     porb = np.interp(pp, lpdist.CDF, lpdist.porb)
 
     return porb
 
 
-def sample_position_from_Pala_2020(rho_0=4.8e-6, h=280, dist_max=600):
+def sample_position_from_Pala_2020(rng, rho_0=4.8e-6, h=280, dist_max=600):
     # LSS dist_max is given in pc
     # x, y, z returned are in kpc
 
@@ -45,7 +45,7 @@ def sample_position_from_Pala_2020(rho_0=4.8e-6, h=280, dist_max=600):
     extraFactor = 5
 
     # determine if we add the remainder of the decimal as a source
-    prob_extra = np.random.uniform(0, 1)
+    prob_extra = rng.uniform(0, 1)
     remainder = N_sample_total - int(N_sample_total)
     if prob_extra < remainder:
         N_sample_total = int(N_sample_total) + 1
@@ -54,8 +54,8 @@ def sample_position_from_Pala_2020(rho_0=4.8e-6, h=280, dist_max=600):
     
     # uniform in a disk around the sun 
     # kb is lazy and will do a rejection sample
-    x = np.random.uniform(-dist_max, dist_max, extraFactor*N_sample_total)
-    y = np.random.uniform(-dist_max, dist_max, extraFactor*N_sample_total)
+    x = rng.uniform(-dist_max, dist_max, extraFactor*N_sample_total)
+    y = rng.uniform(-dist_max, dist_max, extraFactor*N_sample_total)
     r = np.sqrt(x**2 + y**2)
     # first take everything within the disk
     ind_keep, = np.where(r < dist_max)
@@ -67,8 +67,8 @@ def sample_position_from_Pala_2020(rho_0=4.8e-6, h=280, dist_max=600):
     y = y[:N_sample_total]
     
     # next assign the z population
-    z = np.random.exponential(scale=h, size=5*N_sample_total)
-    plane_sample = np.random.uniform(0, 1, 5*N_sample_total)
+    z = rng.exponential(scale=h, size=5*N_sample_total)
+    plane_sample = rng.uniform(0, 1, 5*N_sample_total)
     z[plane_sample < 0.5] = -z[plane_sample < 0.5]
     # filter to systems within dist_max
     z = z[abs(z) < dist_max]
@@ -95,7 +95,7 @@ def calculate_m2_from_porb(porb):
     return m2
     
 
-def get_Pala_sample(mu_m1, sigma_m1, sigma_m2):
+def get_Pala_sample(mu_m1, sigma_m1, sigma_m2, rng):
     pala2020 = pd.read_hdf(paths.data / 'Pala_2020_dat_combo.h5', key='dat')
     c = SkyCoord(pala2020.ra.values * u.deg, pala2020.dec.values * u.deg, distance=pala2020.distance.values * u.pc)
     c = c.transform_to(frame='galactic')
@@ -104,13 +104,13 @@ def get_Pala_sample(mu_m1, sigma_m1, sigma_m2):
     z = c.cartesian.z.value
     porb = pala2020['porb'].values / 60 #convert mins to hours
     m2 = calculate_m2_from_porb(porb)
-    m2_err = np.random.normal(loc=0, scale=sigma_m2, size=len(porb))
+    m2_err = rng.normal(loc=0, scale=sigma_m2, size=len(porb))
     m2 = m2 + m2_err
-    m1 = np.random.normal(mu_m1, sigma_m1, len(porb))
-    inclination = np.arccos(np.random.uniform(-1, 1, len(porb)))
+    m1 = rng.normal(loc=mu_m1, scale=sigma_m1, size=len(porb))
+    inclination = np.arccos(rng.uniform(-1, 1, len(porb)))
     return m1, m2, porb, x/1000, y/1000, z/1000, inclination
 
-def sample_kpc_population(max_distance, mu_m1, sigma_m1, sigma_m2):
+def sample_kpc_population(max_distance, mu_m1, sigma_m1, sigma_m2, rng):
     
 
     # first sample the population
@@ -126,24 +126,24 @@ def sample_kpc_population(max_distance, mu_m1, sigma_m1, sigma_m2):
         ind_check, = np.where(d<0.15*u.kpc)
 
     # assign a random inclination
-    inclination = np.arccos(np.random.uniform(-1, 1, len(x)))
+    inclination = np.arccos(rng.uniform(-1, 1, len(x)))
     
     # sample the primary mass with normal distribution supplied by user
-    m1 = np.random.normal(loc=mu_m1, scale=sigma_m1, size=len(x))
+    m1 = rng.normal(loc=mu_m1, scale=sigma_m1, size=len(x))
     
     # get the orbital periods by sampling from the Pala+2020 table
-    porb = sample_porb_from_Pala_2020(nCV=len(x))
+    porb = sample_porb_from_Pala_2020(nCV=len(x), rng=rng)
     f_gw = 2/(porb * 3600) # this is simple because the binaries are circular and porb is in hrs
 
     # get the matching donor mass from the Knigge+2011 table
     m2 = calculate_m2_from_porb(porb)
-    m2_err = np.random.normal(loc=0, scale=sigma_m2, size=len(x))
+    m2_err = rng.normal(loc=0, scale=sigma_m2, size=len(x))
     m2 = m2 + m2_err
     Pala_reassign = np.zeros(len(x))
     dat = np.vstack([m1, m2, f_gw, inclination, x, y, z, Pala_reassign]).T
 
     # next reassign some of the sources to match the Pala data exactly
-    m1_P, m2_P, porb_P, x_P, y_P, z_P, inc_P = get_Pala_sample(mu_m1, sigma_m1, sigma_m2)
+    m1_P, m2_P, porb_P, x_P, y_P, z_P, inc_P = get_Pala_sample(mu_m1, sigma_m1, sigma_m2, rng)
     
     d = np.sqrt(dat[:,4]**2 + dat[:,5]**2 + dat[:,6]**2) * u.kpc
     ind_150, = np.where(d<0.15*u.kpc)
@@ -151,7 +151,7 @@ def sample_kpc_population(max_distance, mu_m1, sigma_m1, sigma_m2):
     # Some haking required here. Pala sample is 42 sources, so we need to randomly select 42 sources
     # from the 150pc sample and replace with the Pala sample.
     # But we also need to make sure that we don't replace the same source twice.
-    ind_Pala = np.random.choice(ind_150, len(m2_P), replace=False)   
+    ind_Pala = rng.random.choice(ind_150, len(m2_P), replace=False)   
     dat[ind_150, 7] = 2*np.ones(len(ind_150))
 
     dat[ind_Pala, 0] = m1_P
@@ -338,7 +338,7 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
 
         # LSS get normalizing factor and downsample the drawn pop to an accurate density of CV systems
         normfactor = scar_n1kpc / draw_n1kpc
-        downsamp_ind = np.random.choice(overdraw, int(overdraw*normfactor), replace=False)
+        downsamp_ind = rng.choice(overdraw, int(overdraw*normfactor), replace=False)
         xgalcent = xgalcent[downsamp_ind]
         ygalcent = ygalcent[downsamp_ind]
         zgalcent = zgalcent[downsamp_ind]
@@ -354,15 +354,15 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
     print(f'This is a {100*(draw_n1kpc - scar_n1kpc)/scar_n1kpc:.2f}% difference.')
     
     # sample the primary mass with normal distribution supplied by user
-    m1 = np.random.normal(loc=mu_m1, scale=sigma_m1, size=len(xgalcent))
+    m1 = rng.normal(loc=mu_m1, scale=sigma_m1, size=len(xgalcent))
     
     # get the orbital periods by sampling from the Pala+2020 table
-    porb = sample_porb_from_Pala_2020(nCV=len(xgalcent))
+    porb = sample_porb_from_Pala_2020(nCV=len(xgalcent), rng=rng)
     f_gw = 2/(porb * 3600) # this is simple because the binaries are circular and porb is in hrs
 
     # get the matching donor mass from the Knigge+2011 table
     m2 = calculate_m2_from_porb(porb)
-    m2_err = np.random.normal(loc=0, scale=sigma_m2, size=len(xgalcent))
+    m2_err = rngen.normal(loc=0, scale=sigma_m2, size=len(xgalcent))
     m2 = m2 + m2_err
     Pala_reassign = np.zeros(len(xgalcent))
     scar_reassign = np.zeros(len(xgalcent))
@@ -382,7 +382,7 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
     # Some hacking required here. Pala sample is 42 sources, so we need to randomly select 42 sources
     # from the 150pc sample and replace with the Pala sample.
     # But we also need to make sure that we don't replace the same source twice.
-    ind_scar = np.random.choice(ind_1kpc, len(m2_S), replace=False)   
+    ind_scar = rng.choice(ind_1kpc, len(m2_S), replace=False)   
     dat[ind_1kpc, 7] = 2*np.ones(len(ind_1kpc)) # LSS flagging any that are within 1kpc but do not get reassigned as 2.
 
     dat[ind_scar, 0] = m1_S
@@ -479,12 +479,13 @@ def cvpop_frequency_hist_noEMedge(cvpop, freqcolname=' f_gw[Hz]', plot=True):
         plt.ylabel('Count')
         plt.title('CV Population Frequency Distribution')
         plt.savefig(paths.lssfigs / 'cvpop_freq_hist_noEMedge.png', dpi=300, bbox_inches='tight', format='png')
+        plt.close()
 
     return counts, bins
 
 
 
-def dNdmchirp(cvpop, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2colname=' m2[Msun]', plot=True):
+def dNdmchirp(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2colname=' m2[Msun]', plot=True):
     """
     Create chirp mass distribution from given CV population using KDE.
 
@@ -537,13 +538,16 @@ def dNdmchirp(cvpop, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2co
         raise Exception('Number of CVs in fprime bin does not match histogram count!')
 
     fprime_mc = lw.utils.chirp_mass(fprime_CVs[mass1colname] * u.Msun, fprime_CVs[mass2colname] * u.Msun)
-    
+
+    plt.hist(fprime_mc, bins='auto', histtype='step', density=True, label=f'Chirp Mass Distribution at fprime: {fprime:.1e} Hz');
+
     kern = 'gaussian'
     
-    bwrange = np.linspace(1e-4, 1e-1, 1000) 
-    K = 20 # Do 20-fold cross validation
+    print('Finding optimal bandwidth for KDE of chirp mass distribution at fprime bin...')
+    bwrange = np.linspace(1e-4, 1e-1, 10) 
+    K = 2 # Do 20-fold cross validation
     grid = GridSearchCV(KernelDensity(kernel=kern), {'bandwidth': bwrange}, cv=K) 
-    
+    print('starting grid search for optimal bandwidth...')
     # LSS find optimal bandwidth based on chirp mass distribution at fprime
     grid.fit(np.array(fprime_mc)[:, None]) 
     h_opt = grid.best_params_['bandwidth']
@@ -555,7 +559,7 @@ def dNdmchirp(cvpop, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2co
 
     # LSS get log density values from KDE
     log_dens = mc_kde.score_samples(mc_range[:, None])
-    
+
     # normalize and return 0 if chirp mass out of interpolation range
     mc_interp = interp1d(mc_range, np.exp(log_dens)/np.sum(np.exp(log_dens)), fill_value=0, bounds_error=False)
     
@@ -565,12 +569,13 @@ def dNdmchirp(cvpop, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2co
         plt.title('CV Chirp Mass Distribution before EM Gap', fontsize='xx-large')
         plt.xlabel(r'Chirp Mass [$M_{\odot}$]')
         plt.legend()
-        plt.savefig(paths.lssfigs / 'cvpop_chirp_mass_kde.png', dpi=300, bbox_inches='tight', format='png')
+        plt.savefig(paths.lssfigs / f'cvfullgxy_chirp_mass_dist_kde_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
+        plt.close()
 
     return mc_interp, mc_range
 
 
-def N_CVs_gwevol(cvpop, freqcolname=' f_gw[Hz]', plot=True):
+def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]', mass2colname=' m2[Msun]', plot=True):
     """
     Calculate the number of CVs at given frequencies assuming only GW evolution.
 
@@ -602,14 +607,14 @@ def N_CVs_gwevol(cvpop, freqcolname=' f_gw[Hz]', plot=True):
     # and +1 the right edge of that bin to make sure we include the whole bin 
     # in the filling region.
     fprime_and_fgap = fbins[fprime_ind:emgap_inds[-1]+2]
-    dNdmc_func, mc_range = dNdmchirp(cvpop)
+    dNdmc_func, mc_range = dNdmchirp(cvpop, rseed, freqcolname=freqcolname, mass1colname=mass1colname, mass2colname=mass2colname)
 
     # LSS get df and dm for converting later density to number
     df = fbins[1]-fbins[0]
     dm = mc_range[1]-mc_range[0]
 
     # LSS create meshgrid from input arrays
-    Fgrid, Mgrid = np.meshgrid(fbins, mc_range)
+    Fgrid, Mgrid = np.meshgrid(fprime_and_fgap, mc_range)
 
     # See eqn A2 of Nissanke et al. 2012
     # G, c in m, s, kg
@@ -634,32 +639,35 @@ def N_CVs_gwevol(cvpop, freqcolname=' f_gw[Hz]', plot=True):
 
     fspace = fprime_and_fgap
     N = dtdf * dNdmc * normfact * df * dm
-    np.save(paths.lssdata / 'N_gwevol_unsmoothed.npy', N)
+    np.save(paths.lssdata / f'N_gwevol_unsmoothed_rs{rseed}.npy', N)
     if plot:
         plt.imshow(N, aspect='auto', origin='lower', extent=[fprime_and_fgap[0], fprime_and_fgap[-1],
                                                             mc_range[0], mc_range[-1]],)
         plt.xlabel('Frequency [Hz]')
         plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
         plt.title('N_gwevol Unsmoothed')
-        plt.savefig(paths.lssfigs / 'N_gwevol_unsmoothed.png', dpi=300, bbox_inches='tight', format='png')
+        plt.savefig(paths.lssfigs / f'N_gwevol_unsmoothed_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
+        plt.close()
 
     # LSS since this joint distribution could be coarser in frequency, smooth a bit 
     # with a linear interpolation
-    if N.shape[1] > N.shape[0]:
+    if N.shape[1] < N.shape[0]:
         print('Smoothing N_gwevol in frequency with linear interpolation...')
         Ndist_finterp = np.zeros((N.shape[0], N.shape[0]))
         fspace = np.linspace(fprime_and_fgap[0], fprime_and_fgap[-1], 100)
         for a in range(N.shape[0]):
-            fint = interp1d(fprime_and_fgap,  N[a,:], fill_value=0, bounds_error=False)
-            Ndist_finterp[a,:] = fint(fspace)
-        np.save(paths.lssdata / 'N_gwevol_smoothed.npy', Ndist_finterp)
+            fint = np.interp(fspace, fprime_and_fgap,  N[a,:])
+            Ndist_finterp[a,:] = fint
+        np.save(paths.lssdata / f'N_gwevol_smoothed_rs{rseed}.npy', Ndist_finterp)
         if plot:
             plt.imshow(Ndist_finterp, aspect='auto', origin='lower', extent=[fspace[0], fspace[-1],
                                                             mc_range[0], mc_range[-1]],)
             plt.xlabel('Frequency [Hz]')
             plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
             plt.title('N_gwevol Smoothed in Frequency')
-            plt.savefig(paths.lssfigs / 'N_gwevol_smoothed.png', dpi=300, bbox_inches='tight', format='png')
+            plt.savefig(paths.lssfigs / f'N_gwevol_smoothed_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
+            plt.close()
+            
         N = Ndist_finterp
 
     # LSS lets normalize N to prepare for rejection sampling.
@@ -667,7 +675,7 @@ def N_CVs_gwevol(cvpop, freqcolname=' f_gw[Hz]', plot=True):
 
     return N, fspace, mc_range
 
-def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, plot=True):
+def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, npar=1000, plot=True):
     """Simple rejection sampling to fill the EM gap based on the N_gwevol distribution.
 
     Parameters
@@ -689,33 +697,33 @@ def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, plot=True):
         array of shape (nsamples, 2) containing the frequency and 
         chirp mass of the sampled points in the supplied EM gap distribution.
     """
-    np.random.seed(seednum)
+    rng = np.random.default_rng(seednum)
+    truepts = np.zeros((nsamples, 2))
+    accepted = 0
 
-    randmc = np.random.uniform(low=mc_range[0], high=mc_range[-1], size=nsamples)
-    randf = np.random.uniform(low=fspace[0], high=fspace[-1], size=nsamples)
-    randnum = np.random.uniform(low=0, high=1, size=nsamples)
-
-    truepts = []
-
-    while len(truepts) < nsamples:
-        randmc = np.random.uniform(low=mc_range[0], high=mc_range[-1])
-        randf = np.random.uniform(low=fspace[0], high=fspace[-1])
-        randnum = np.random.uniform(low=0, high=1)
-        f_idx = np.argmin(np.abs(fspace-randf))
-        m_idx = np.argmin(np.abs(mc_range-randmc))
-        if randnum < N[m_idx, f_idx]:
-            truepts.append([randf, randmc])
+    while accepted < nsamples:
+        randmc = rng.uniform(low=mc_range[0], high=mc_range[-1], size=npar)
+        randf = rng.uniform(low=fspace[0], high=fspace[-1], size=npar)
+        randnum = rng.uniform(low=0, high=1, size=npar)
+        f_idx = np.argmin(np.abs(fspace[:, None] - randf[None, :]), axis=0)
+        m_idx = np.argmin(np.abs(mc_range[:, None] - randmc[None, :]), axis=0)
+        stat = randnum < N[m_idx, f_idx]
+        lo, hi = accepted, np.min([accepted+np.sum(stat), nsamples])
+        truepts[lo:hi, 0] = (randf[stat])[:hi-lo]
+        truepts[lo:hi, 1] = (randmc[stat])[:hi-lo]
+        accepted += np.sum(stat)
 
     truepts = np.array(truepts)
     np.save(paths.lssdata / f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.npy', truepts)
     if plot:
-        plt.scatter(truepts[:,0], truepts[:,1], s=1, c='w' alpha=0.5)
+        plt.scatter(truepts[:,0], truepts[:,1], s=1, c='w', alpha=0.5)
         plt.imshow(N, aspect='auto', origin='lower', extent=[fspace[0], fspace[-1], mc_range[0], mc_range[-1]], alpha=0.7)
         plt.xlabel('Frequency [Hz]')
         plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
         plt.title(f'Rejection Sampled EM Gap, {nsamples} samples')
         plt.savefig(paths.lssfigs / f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.png', dpi=300, bbox_inches='tight', format='png')
-    
+        plt.close()
+
     return truepts
 
 if __name__ == '__main__':
@@ -727,9 +735,10 @@ if __name__ == '__main__':
     sigma_m2 = 0.001
 
     # FIX A SEED TO REPRODUCE THE SAMPLE
-    rseed = 170817
+    #rseed = 170817
+    rseed = 150914
+    # rseed = 42
     rngen = np.random.default_rng(rseed)
-    np.random.seed(rseed)
 
     dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rngen)
     print('Sampled population size:', len(dat))
@@ -737,21 +746,24 @@ if __name__ == '__main__':
     # save the data
     np.savetxt(paths.lssdata / f"dat_fullgxy_rs{rseed}_final.txt", dat, delimiter=',', header="m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Scar_reassigned, Pala_reassigned, dist_from_sun[kpc]", fmt='%.10f')
     
+    pddat = pd.DataFrame(dat, columns=popdatcolnames)
+
     # LSS now we need to fill the EM gap
     # first we find joint freq/chirp mass dist for CVs in emgap according to GR
     # LSS N is the joint probability distribution of CVs in the f, mc space through the EM gap.
     # LSS fspace and mc_range are the corresponding frequencies and chirp masses
     # for the rows and columns of N.
-    N, fspace, mspace = N_CVs_gwevol(dat)
+    N, fspace, mspace = N_CVs_gwevol(pddat, rseed, freqcolname='f_gw[Hz]', mass1colname='m1[Msun]', mass2colname='m2[Msun]')
 
     # rejection sample this distribution
-    numsamp = int(1e4)
+    numsamp = int(1e6)
     # LSS pts will have shape (numsamp, 2) with columns f and mchirp
-    pts = rejection_sample_emgap(N, fspace, mspace, seednum=rseed, nsamples=numsamp)
+    print('Rejection sampling EM gap...')
+    pts = rejection_sample_emgap(N, fspace, mspace, seednum=rseed, nsamples=numsamp, npar=int(1e6))
 
     # then we need to normalize according to the number of CVs in the 
     # lowest freq bin just before the EM gap.
-    counts, bns = cvpop_frequency_hist_noEMedge(dat, plot=False)
+    counts, bns = cvpop_frequency_hist_noEMedge(pddat, freqcolname='f_gw[Hz]', plot=False)
     emg_cts, _ = np.histogram(pts[:, 0], bins=bns) # LSS getting counts of EM gap draws 
     num_normfactor = emg_cts/counts
     num_normfactor[~np.isfinite(num_normfactor)] = 0 # set inf values to 0
@@ -760,20 +772,22 @@ if __name__ == '__main__':
     # LSS how many pts do we need to draw to match the number in gxy
     normdraws = pts.shape[0]/num_normfactor 
     # LSS downsample
-    dwnsamp_pts = pts[np.random.choice(pts.shape[0], int(normdraws), replace=True)]
+    dwnsamp_pts = pts[rngen.choice(pts.shape[0], int(normdraws), replace=True)]
     emgap_inds = np.where(counts==0)[0] 
     fprime_ind = np.argmax(counts[:emgap_inds[0]])
     fprime = bns[fprime_ind]
     df = bns[1]-bns[0]
     # LSS only keep points drawn within the EM gap (above fprime + df)
     dwnsamp_pts_emgap = dwnsamp_pts[dwnsamp_pts[:,0]>fprime+df]
-    plt.hist(counts, bins=bns, histtype='step', label='CV population')
+    print(f"Number of points drawn in EM gap after downsampling: {len(dwnsamp_pts_emgap)}")
+    plt.stairs(counts, bns, label='CV population')
     plt.hist(dwnsamp_pts[:, 0], bins=bns, histtype='step', label='Rejection Sampled Points')
     plt.hist(dwnsamp_pts_emgap[:, 0], bins=bns, histtype='step', label='Rejection Sampled Points in EM gap')
     plt.xlabel('Frequency [Hz]')
     plt.ylabel('Number of CVs')
     plt.legend()
-    plt.savefig(paths.lssfigs / f'cvfullgxy_emg_filled_rseed{rseed}_nsamp{numsamp}_freq_hist.png', dpi=300, bbox_inches='tight', format='png')
+    plt.savefig(paths.lssfigs / f'cvfullgxy_emg_filled_rseed{rseed}_nsamp{numsamp:.1e}_freq_hist.png', dpi=300, bbox_inches='tight', format='png')
+    plt.close()
 
     # then we need to assign galactic positions to CVs in EM gap.
     xgalcent, ygalcent, zgalcent, inc = galactic_positions(len(dwnsamp_pts_emgap), rngen, model="McMillan_fixed", disk='thin')
@@ -787,15 +801,15 @@ if __name__ == '__main__':
     emgap_lat = emgap_SSBc.lat.to(u.rad).value
     emgap_lon = emgap_SSBc.lon.to(u.rad).value
     hp.mollview(coord='E')
-    hp.projscatter(emgap_lon*u.rad.to(u.deg),emgap_lat*u.rad.to(u.deg),lonlat=True,color='r',alpha=0.5,s=10, label='EM gap CVs')
     hp.projscatter(cvgxy_lon*u.rad.to(u.deg),cvgxy_lat*u.rad.to(u.deg),lonlat=True,color='k',alpha=0.5,s=4, label='CV Population')
+    hp.projscatter(emgap_lon*u.rad.to(u.deg),emgap_lat*u.rad.to(u.deg),lonlat=True,color='r',alpha=0.5,s=10, label='EM gap CVs')
     plt.legend()
     plt.savefig(paths.lssfigs / f'cvfullgxy_emg_rseed{rseed}_nsamp{numsamp}_skymap.png', dpi=300, bbox_inches='tight', format='png')
-
+    plt.close()
 
     # LSS save emgap CVs to a file
     emgap_dat = np.hstack((dwnsamp_pts_emgap, xgalcent[:, None], ygalcent[:, None], zgalcent[:, None], inc[:, None]))
-    np.savetxt(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp}_final.txt", emgap_dat, delimiter=',', header="f_gw[Hz], Mchirp[Msun], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], inclination[rad]", fmt='%.10f')
+    np.savetxt(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp:.1e}_final.txt", emgap_dat, delimiter=',', header="f_gw[Hz], Mchirp[Msun], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], inclination[rad]", fmt='%.10f')
 
     # LSS convert everything to a BLIP readable format.
     blip_columns = ['f','h','lat','long']
@@ -803,7 +817,7 @@ if __name__ == '__main__':
     ## making sure we've handled our coordinate transforms correctly
     cvgxy_dist = cvgxy_SSBc.distance.to(u.kpc)
     emgap_dist = emgap_SSBc.distance.to(u.kpc)
-    cvgxy_mc = lw.utils.chirp_mass(dat[:, popdatcolnames.index('m1[Msun]')], dat[:, popdatcolnames.index('m2[Msun]')]).to_numpy()*u.Msun
+    cvgxy_mc = lw.utils.chirp_mass(pddat['m1[Msun]'], pddat['m2[Msun]']).to_numpy()*u.Msun
     emgap_mc = dwnsamp_pts_emgap[:, 1]*u.Msun # LSS this is already the chirp mass
     cvgxy_fs = dat[:, popdatcolnames.index('f_gw[Hz]')]
     cvgxy_f_orb = cvgxy_fs*u.Hz/2
@@ -818,12 +832,12 @@ if __name__ == '__main__':
 
     cvgxy_blip_df = pd.DataFrame(data=np.vstack((cvgxy_fs,cvgxy_hs.flatten(),cvgxy_lat,cvgxy_lon)).T,columns=blip_columns)
     emgap_blip_df = pd.DataFrame(data=np.vstack((emgap_fs,emgap_hs.flatten(),emgap_lat,emgap_lon)).T,columns=blip_columns)
-    cvgxy_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_rs{rseed}_nsamp{numsamp}_BLIP_final.txt", index=False,sep=' ',header=False)
-    emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp}_BLIP_final.txt", index=False,sep=' ',header=False)
+    cvgxy_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
+    emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
 
     combined_fs = np.hstack((cvgxy_fs, emgap_fs))
     combined_hs = np.hstack((cvgxy_hs.flatten(), emgap_hs.flatten()))
     combined_lat = np.hstack((cvgxy_lat, emgap_lat))
     combined_lon = np.hstack((cvgxy_lon, emgap_lon))
     cvgxy_emgap_blip_df = pd.DataFrame(data=np.vstack((combined_fs,combined_hs,combined_lat,combined_lon)).T,columns=blip_columns)
-    cvgxy_emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_combined_rs{rseed}_nsamp{numsamp}_BLIP_final.txt", index=False,sep=' ',header=False)
+    cvgxy_emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_combined_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
