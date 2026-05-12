@@ -544,8 +544,8 @@ def dNdmchirp(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', 
     kern = 'gaussian'
     
     print('Finding optimal bandwidth for KDE of chirp mass distribution at fprime bin...')
-    bwrange = np.linspace(1e-4, 1e-1, 10) 
-    K = 2 # Do 20-fold cross validation
+    bwrange = np.logspace(-5, -2, 100) 
+    K = 5 # Do 20-fold cross validation
     grid = GridSearchCV(KernelDensity(kernel=kern), {'bandwidth': bwrange}, cv=K) 
     print('starting grid search for optimal bandwidth...')
     # LSS find optimal bandwidth based on chirp mass distribution at fprime
@@ -736,8 +736,9 @@ if __name__ == '__main__':
 
     # FIX A SEED TO REPRODUCE THE SAMPLE
     #rseed = 170817
-    rseed = 150914
+    #rseed = 150914
     # rseed = 42
+    rseed = 2035
     rngen = np.random.default_rng(rseed)
 
     dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rngen)
