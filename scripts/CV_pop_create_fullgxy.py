@@ -12,6 +12,7 @@ from sklearn.neighbors import KernelDensity
 from sklearn.model_selection import GridSearchCV
 import matplotlib.pyplot as plt
 import healpy as hp
+import os
 
 
 def sample_porb_from_Pala_2020(nCV, rng):
@@ -290,7 +291,7 @@ def galactic_positions(size, rng, model="McMillan",disk='thick'):
     return xGX, yGX, zGX, inc
 
 
-def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):    
+def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng, disk='thin'):    
     """sample the MW's CV population, normalized by the Scaringi 2023 1kpc population based on Pala2020 space density measurements.
 
     Parameters
@@ -320,17 +321,15 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
     #scar_n1kpc = scaringi1kpc_pop.shape[0]
     scar_n1kpc = 7284
 
-    galcentdef = apyco.galactocentric_frame_defaults.get_from_registry('latest')
-    galcent_sun_dist = galcentdef['parameters']['galcen_distance'].to('kpc').value
-    galcent_z_sun = galcentdef['parameters']['z_sun'].to('kpc').value
-    print(galcent_sun_dist, galcent_z_sun)
 
     # LSS checking that whatever draw is made has 42 sources within 150 pc (after normalization) to match Pala sample.
     ind_check = []
     while len(ind_check) < scar_n1kpc:
         print("Drawing galactic positions...")
-        xgalcent, ygalcent, zgalcent, inc = galactic_positions(overdraw, rng, model="McMillan_fixed",disk='thin')
-        dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
+        xgalcent, ygalcent, zgalcent, inc = galactic_positions(overdraw, rng, model="McMillan_fixed",disk=disk)
+        drawco = apyco.SkyCoord(x=xgalcent*u.kpc, y=ygalcent*u.kpc, z=zgalcent*u.kpc, frame='galactocentric', representation_type='cartesian')
+        drawcoSSBc = drawco.transform_to(apyco.BarycentricMeanEcliptic)
+        dist_from_sun = drawcoSSBc.distance.to(u.kpc).value
         
         # LSS astropy galactocentric coordinates assume 8.122 kpc for distance to gal center (origin of galcent)
         # LSS and z_sun = 20.8 pc. Sun is along x-axis. Lets find all systems within 1kpc of sun.
@@ -344,10 +343,16 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
         zgalcent = zgalcent[downsamp_ind]
         inc = inc[downsamp_ind]
         # LSS recalc distance post downsample
-        dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
+        drawco = apyco.SkyCoord(x=xgalcent*u.kpc, y=ygalcent*u.kpc, z=zgalcent*u.kpc, frame='galactocentric', representation_type='cartesian')
+        drawcoSSBc = drawco.transform_to(apyco.BarycentricMeanEcliptic)
+        dist_from_sun = drawcoSSBc.distance.to(u.kpc).value
         ind_check, = np.where(dist_from_sun<1)
         print('Not enough sources within 1 kpc, redrawing population...')
 
+    drawco = apyco.SkyCoord(x=xgalcent*u.kpc, y=ygalcent*u.kpc, z=zgalcent*u.kpc, frame='galactocentric', representation_type='cartesian')
+    drawcoSSBc = drawco.transform_to(apyco.BarycentricMeanEcliptic)
+    dist_from_sun = drawcoSSBc.distance.to(u.kpc).value
+    
     draw_n1kpc = np.sum(dist_from_sun < 1)
     print(f"Number of sources within 1 kpc after downsampling: {draw_n1kpc}")
     print(f"Difference between draw and Scaringi 1kpc pop after downsampling: {draw_n1kpc - scar_n1kpc}")
@@ -366,7 +371,6 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
     m2 = m2 + m2_err
     Pala_reassign = np.zeros(len(xgalcent))
     scar_reassign = np.zeros(len(xgalcent))
-    dist_from_sun = np.zeros(len(xgalcent))
     dat = np.vstack([m1, m2, f_gw, inc, xgalcent, ygalcent, zgalcent, scar_reassign, Pala_reassign, dist_from_sun]).T
 
     # next reassign some of the sources to match the Scaringi data exactly
@@ -375,7 +379,6 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
 
     m1_S, m2_S, fgw_S, inc_S, x_S, y_S, z_S, P_r = scaringi1kpc_pop.iloc[:,:].values.T
     
-    dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
     ind_1kpc, = np.where(dist_from_sun<1) # LSS finding the sources within 1 kpc for reassignment to Scaringi pop.
     print(len(ind_1kpc), "sources within 1 kpc available for reassignment to Scaringi sample.") 
 
@@ -395,8 +398,10 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng):
     dat[ind_scar, 7] = np.ones(len(m1_S)) # LSS any that got reassigned to scaringi data is 1
     dat[ind_scar, 8] = P_r # LSS same rules with Pala 42 sources / 150 pc -- 2=within 150 pc, 1=w/i 150pc and reassigned to a Pala source.
 
-    dist_from_sun = np.sqrt((xgalcent - galcent_sun_dist)**2 + ygalcent**2 + (zgalcent - galcent_z_sun)**2)
-    dat[:, 9] = dist_from_sun
+    scarco = apyco.SkyCoord(x=x_S*u.kpc, y=y_S*u.kpc, z=z_S*u.kpc, frame='galactocentric', representation_type='cartesian')
+    scarcoSSBc = scarco.transform_to(apyco.BarycentricMeanEcliptic)
+    scar_dist_from_sun = scarcoSSBc.distance.to(u.kpc).value
+    dat[ind_scar, 9] = scar_dist_from_sun
     return dat
 
 def convert_popsynth_to_blipreadable(input_loc, output_loc):
@@ -435,7 +440,7 @@ def convert_popsynth_to_blipreadable(input_loc, output_loc):
 
     blip_df.to_csv(output_loc, index=False,sep=' ',header=False)
 
-def cvpop_frequency_hist_noEMedge(cvpop, freqcolname=' f_gw[Hz]', plot=True):
+def cvpop_frequency_hist_noEMedge(cvpop, freqcolname=' f_gw[Hz]', plot=True, outdir=None):
     """
     Create a histogram of CV population in freq. avoid edge effects before EM gap.
 
@@ -478,14 +483,17 @@ def cvpop_frequency_hist_noEMedge(cvpop, freqcolname=' f_gw[Hz]', plot=True):
         plt.xlabel('Frequency [Hz]')
         plt.ylabel('Count')
         plt.title('CV Population Frequency Distribution')
-        plt.savefig(paths.lssfigs / 'cvpop_freq_hist_noEMedge.png', dpi=300, bbox_inches='tight', format='png')
+        if outdir is not None:
+            plt.savefig(outdir + 'cvpop_freq_hist_noEMedge.png', dpi=300, bbox_inches='tight', format='png')
+        else:
+            plt.savefig(paths.lssfigs / 'cvpop_freq_hist_noEMedge.png', dpi=300, bbox_inches='tight', format='png')
         plt.close()
 
     return counts, bins
 
 
 
-def dNdmchirp(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2colname=' m2[Msun]', plot=True):
+def dNdmchirp(cvpop, rseed, outdir, disk='thin', freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', mass2colname=' m2[Msun]', plot=True):
     """
     Create chirp mass distribution from given CV population using KDE.
 
@@ -499,6 +507,12 @@ def dNdmchirp(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', 
     ----------
     cvpop : DataFrame
         DataFrame containing CV population data.
+    rseed : int
+        Random seed for reproducibility in KDE sampling.
+    outdir : str
+        Directory to save any output plots or files.
+    disk : str, optional
+        Whether to use the 'thin' or 'thick' disk population for the CVs (default is 'thin'). Used here only for naming output files.
     freqcolname : str, optional
         Column name for frequency in the CV population DataFrame 
         (default is ' f_gw[Hz]').
@@ -569,13 +583,13 @@ def dNdmchirp(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname='# m1[Msun]', 
         plt.title('CV Chirp Mass Distribution before EM Gap', fontsize='xx-large')
         plt.xlabel(r'Chirp Mass [$M_{\odot}$]')
         plt.legend()
-        plt.savefig(paths.lssfigs / f'cvfullgxy_chirp_mass_dist_kde_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
+        plt.savefig(outdir + f'cvfullgxy_chirp_mass_dist_kde_{disk}_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
         plt.close()
 
     return mc_interp, mc_range
 
 
-def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]', mass2colname=' m2[Msun]', plot=True):
+def N_CVs_gwevol(cvpop, rseed, outdir, disk='thin', freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]', mass2colname=' m2[Msun]', plot=True):
     """
     Calculate the number of CVs at given frequencies assuming only GW evolution.
 
@@ -584,19 +598,33 @@ def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]'
 
     Parameters
     ----------
-    f : array
-        array of frequencies in Hz. Must include fprime (freq with most CVs before EM gap) 
-        as first frequency to ensure proper normalization.
-    mchirp : array
-        array of chirp masses in solar masses
-    
+    cvpop : DataFrame
+        DataFrame containing CV population data.
+    rseed : int
+        Random seed for reproducibility.
+    outdir : str
+        Directory to save output files.
+    disk : str, optional
+        Whether to use 'thin' or 'thick' disk for galactic distribution (default is 'thin'). Here it doesn't really matter but is used for saving file names.
+    freqcolname : str, optional
+        Column name for frequency in the CV population DataFrame
+        (default is ' f_gw[Hz]').
+    mass1colname : str, optional
+        Column name for primary mass in the CV population DataFrame
+        (default is ' m1[Msun]').
+    mass2colname : str, optional
+        Column name for secondary mass in the CV population DataFrame
+        (default is ' m2[Msun]').
+    plot : bool, optional
+        Whether to plot the results (default is True).
+
     Returns
     -------
     N : array
         number of CVs at each frequency (summed over chirp mass)
     """
     # LSS get freq binning of CV pop
-    counts, fbins = cvpop_frequency_hist_noEMedge(cvpop, freqcolname)
+    counts, fbins = cvpop_frequency_hist_noEMedge(cvpop, freqcolname, plot=False)
 
     # LSS determine frequency and chirp mass ranges over which to fill the 2D distribution
     emgap_inds = np.where(counts==0)[0] # LSS get indices of EM gap
@@ -607,7 +635,7 @@ def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]'
     # and +1 the right edge of that bin to make sure we include the whole bin 
     # in the filling region.
     fprime_and_fgap = fbins[fprime_ind:emgap_inds[-1]+2]
-    dNdmc_func, mc_range = dNdmchirp(cvpop, rseed, freqcolname=freqcolname, mass1colname=mass1colname, mass2colname=mass2colname)
+    dNdmc_func, mc_range = dNdmchirp(cvpop, rseed, outdir, disk=disk, freqcolname=freqcolname, mass1colname=mass1colname, mass2colname=mass2colname)
 
     # LSS get df and dm for converting later density to number
     df = fbins[1]-fbins[0]
@@ -639,14 +667,14 @@ def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]'
 
     fspace = fprime_and_fgap
     N = dtdf * dNdmc * normfact * df * dm
-    np.save(paths.lssdata / f'N_gwevol_unsmoothed_rs{rseed}.npy', N)
+    np.save(outdir + f'N_gwevol_unsmoothed_{disk}_rs{rseed}.npy', N)
     if plot:
         plt.imshow(N, aspect='auto', origin='lower', extent=[fprime_and_fgap[0], fprime_and_fgap[-1],
                                                             mc_range[0], mc_range[-1]],)
         plt.xlabel('Frequency [Hz]')
         plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
         plt.title('N_gwevol Unsmoothed')
-        plt.savefig(paths.lssfigs / f'N_gwevol_unsmoothed_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
+        plt.savefig(outdir + f'N_gwevol_unsmoothed_{disk}_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
         plt.close()
 
     # LSS since this joint distribution could be coarser in frequency, smooth a bit 
@@ -658,14 +686,14 @@ def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]'
         for a in range(N.shape[0]):
             fint = np.interp(fspace, fprime_and_fgap,  N[a,:])
             Ndist_finterp[a,:] = fint
-        np.save(paths.lssdata / f'N_gwevol_smoothed_rs{rseed}.npy', Ndist_finterp)
+        np.save(outdir + f'N_gwevol_smoothed_{disk}_rs{rseed}.npy', Ndist_finterp)
         if plot:
             plt.imshow(Ndist_finterp, aspect='auto', origin='lower', extent=[fspace[0], fspace[-1],
                                                             mc_range[0], mc_range[-1]],)
             plt.xlabel('Frequency [Hz]')
             plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
             plt.title('N_gwevol Smoothed in Frequency')
-            plt.savefig(paths.lssfigs / f'N_gwevol_smoothed_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
+            plt.savefig(outdir + f'N_gwevol_smoothed_{disk}_rs{rseed}.png', dpi=300, bbox_inches='tight', format='png')
             plt.close()
             
         N = Ndist_finterp
@@ -675,7 +703,7 @@ def N_CVs_gwevol(cvpop, rseed, freqcolname=' f_gw[Hz]', mass1colname=' m1[Msun]'
 
     return N, fspace, mc_range
 
-def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, npar=1000, plot=True):
+def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, outdir, npar=1000, plot=True):
     """Simple rejection sampling to fill the EM gap based on the N_gwevol distribution.
 
     Parameters
@@ -714,14 +742,14 @@ def rejection_sample_emgap(N, fspace, mc_range, seednum, nsamples, npar=1000, pl
         accepted += np.sum(stat)
 
     truepts = np.array(truepts)
-    np.save(paths.lssdata / f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.npy', truepts)
+    np.save(outdir + f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.npy', truepts)
     if plot:
         plt.scatter(truepts[:,0], truepts[:,1], s=1, c='w', alpha=0.5)
         plt.imshow(N, aspect='auto', origin='lower', extent=[fspace[0], fspace[-1], mc_range[0], mc_range[-1]], alpha=0.7)
         plt.xlabel('Frequency [Hz]')
         plt.ylabel(r'Chirp Mass [$M_{\odot}$]')
         plt.title(f'Rejection Sampled EM Gap, {nsamples} samples')
-        plt.savefig(paths.lssfigs / f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.png', dpi=300, bbox_inches='tight', format='png')
+        plt.savefig(outdir + f'rejection_sampled_emgap_{seednum}_{nsamples:.1e}samp.png', dpi=300, bbox_inches='tight', format='png')
         plt.close()
 
     return truepts
@@ -733,19 +761,22 @@ if __name__ == '__main__':
     mu_m1 = 0.7
     sigma_m1 = 0.001
     sigma_m2 = 0.001
+    disc = 'thin'
+    numsamp = int(1e6)
 
     # FIX A SEED TO REPRODUCE THE SAMPLE
-    #rseed = 170817
-    #rseed = 150914
-    # rseed = 42
     rseed = 2035
     rngen = np.random.default_rng(rseed)
+    outputdir = paths.lssdata / f'CV_fullgxy/rseed{rseed}_{disc}/'
+    outputdir = str(outputdir) + '/'
+    print(f'Output datafiles and figures will be saved in: {outputdir}')
+    os.makedirs(outputdir, exist_ok=True)
 
-    dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rngen)
+    dat = sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rngen, disk=disc)
     print('Sampled population size:', len(dat))
     popdatcolnames = ['m1[Msun]', 'm2[Msun]', 'f_gw[Hz]', 'inclination[rad]', 'x_galcent[kpc]', 'y_galcent[kpc]', 'z_galcent[kpc]', 'Scar_reassigned', 'Pala_reassigned', 'dist_from_sun[kpc]']
     # save the data
-    np.savetxt(paths.lssdata / f"dat_fullgxy_rs{rseed}_final.txt", dat, delimiter=',', header="m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Scar_reassigned, Pala_reassigned, dist_from_sun[kpc]", fmt='%.10f')
+    np.savetxt(outputdir + f"dat_fullgxy_{disc}_rs{rseed}_final.txt", dat, delimiter=',', header="m1[Msun], m2[Msun], f_gw[Hz], inclination[rad], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], Scar_reassigned, Pala_reassigned, dist_from_sun[kpc]", fmt='%.10f')
     
     pddat = pd.DataFrame(dat, columns=popdatcolnames)
 
@@ -754,13 +785,12 @@ if __name__ == '__main__':
     # LSS N is the joint probability distribution of CVs in the f, mc space through the EM gap.
     # LSS fspace and mc_range are the corresponding frequencies and chirp masses
     # for the rows and columns of N.
-    N, fspace, mspace = N_CVs_gwevol(pddat, rseed, freqcolname='f_gw[Hz]', mass1colname='m1[Msun]', mass2colname='m2[Msun]')
+    N, fspace, mspace = N_CVs_gwevol(pddat, rseed, outdir=outputdir, freqcolname='f_gw[Hz]', mass1colname='m1[Msun]', mass2colname='m2[Msun]')
 
     # rejection sample this distribution
-    numsamp = int(1e6)
     # LSS pts will have shape (numsamp, 2) with columns f and mchirp
     print('Rejection sampling EM gap...')
-    pts = rejection_sample_emgap(N, fspace, mspace, seednum=rseed, nsamples=numsamp, npar=int(1e6))
+    pts = rejection_sample_emgap(N, fspace, mspace, outdir=outputdir, seednum=rseed, nsamples=numsamp, npar=int(1e6))
 
     # then we need to normalize according to the number of CVs in the 
     # lowest freq bin just before the EM gap.
@@ -787,11 +817,11 @@ if __name__ == '__main__':
     plt.xlabel('Frequency [Hz]')
     plt.ylabel('Number of CVs')
     plt.legend()
-    plt.savefig(paths.lssfigs / f'cvfullgxy_emg_filled_rseed{rseed}_nsamp{numsamp:.1e}_freq_hist.png', dpi=300, bbox_inches='tight', format='png')
+    plt.savefig(outputdir + f'cvfullgxy_emg_filled_rseed{rseed}_nsamp{numsamp:.1e}_freq_hist.png', dpi=300, bbox_inches='tight', format='png')
     plt.close()
 
     # then we need to assign galactic positions to CVs in EM gap.
-    xgalcent, ygalcent, zgalcent, inc = galactic_positions(len(dwnsamp_pts_emgap), rngen, model="McMillan_fixed", disk='thin')
+    xgalcent, ygalcent, zgalcent, inc = galactic_positions(len(dwnsamp_pts_emgap), rngen, model="McMillan_fixed", disk=disc)
     # LSS plot a comparison skymap of positions
     cvgxy_galcentco = apyco.SkyCoord(x=dat[:, popdatcolnames.index('x_galcent[kpc]')]*u.kpc, y=dat[:, popdatcolnames.index('y_galcent[kpc]')]*u.kpc, z=dat[:, popdatcolnames.index('z_galcent[kpc]')]*u.kpc, frame='galactocentric', representation_type='cartesian')
     emgap_galcentco = apyco.SkyCoord(x=xgalcent*u.kpc, y=ygalcent*u.kpc, z=zgalcent*u.kpc, frame='galactocentric', representation_type='cartesian')
@@ -805,12 +835,12 @@ if __name__ == '__main__':
     hp.projscatter(cvgxy_lon*u.rad.to(u.deg),cvgxy_lat*u.rad.to(u.deg),lonlat=True,color='k',alpha=0.5,s=4, label='CV Population')
     hp.projscatter(emgap_lon*u.rad.to(u.deg),emgap_lat*u.rad.to(u.deg),lonlat=True,color='r',alpha=0.5,s=10, label='EM gap CVs')
     plt.legend()
-    plt.savefig(paths.lssfigs / f'cvfullgxy_emg_rseed{rseed}_nsamp{numsamp}_skymap.png', dpi=300, bbox_inches='tight', format='png')
+    plt.savefig(outputdir + f'cvfullgxy_emg_rseed{rseed}_nsamp{numsamp}_skymap.png', dpi=300, bbox_inches='tight', format='png')
     plt.close()
 
     # LSS save emgap CVs to a file
     emgap_dat = np.hstack((dwnsamp_pts_emgap, xgalcent[:, None], ygalcent[:, None], zgalcent[:, None], inc[:, None]))
-    np.savetxt(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp:.1e}_final.txt", emgap_dat, delimiter=',', header="f_gw[Hz], Mchirp[Msun], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], inclination[rad]", fmt='%.10f')
+    np.savetxt(outputdir + f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp:.1e}_final.txt", emgap_dat, delimiter=',', header="f_gw[Hz], Mchirp[Msun], x_galcent[kpc], y_galcent[kpc], z_galcent[kpc], inclination[rad]", fmt='%.10f')
 
     # LSS convert everything to a BLIP readable format.
     blip_columns = ['f','h','lat','long']
@@ -833,12 +863,12 @@ if __name__ == '__main__':
 
     cvgxy_blip_df = pd.DataFrame(data=np.vstack((cvgxy_fs,cvgxy_hs.flatten(),cvgxy_lat,cvgxy_lon)).T,columns=blip_columns)
     emgap_blip_df = pd.DataFrame(data=np.vstack((emgap_fs,emgap_hs.flatten(),emgap_lat,emgap_lon)).T,columns=blip_columns)
-    cvgxy_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
-    emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
+    cvgxy_blip_df.to_csv(outputdir + f"dat_fullgxy_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
+    emgap_blip_df.to_csv(outputdir + f"dat_fullgxy_emgap_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
 
     combined_fs = np.hstack((cvgxy_fs, emgap_fs))
     combined_hs = np.hstack((cvgxy_hs.flatten(), emgap_hs.flatten()))
     combined_lat = np.hstack((cvgxy_lat, emgap_lat))
     combined_lon = np.hstack((cvgxy_lon, emgap_lon))
     cvgxy_emgap_blip_df = pd.DataFrame(data=np.vstack((combined_fs,combined_hs,combined_lat,combined_lon)).T,columns=blip_columns)
-    cvgxy_emgap_blip_df.to_csv(paths.lssdata / f"dat_fullgxy_emgap_combined_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
+    cvgxy_emgap_blip_df.to_csv(outputdir + f"dat_fullgxy_emgap_combined_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
