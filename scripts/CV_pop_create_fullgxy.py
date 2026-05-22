@@ -761,7 +761,8 @@ if __name__ == '__main__':
     mu_m1 = 0.7
     sigma_m1 = 0.001
     sigma_m2 = 0.001
-    disc = 'thin'
+    #disc = 'thin'
+    disc = 'thick'
     numsamp = int(1e6)
 
     # FIX A SEED TO REPRODUCE THE SAMPLE
@@ -785,7 +786,7 @@ if __name__ == '__main__':
     # LSS N is the joint probability distribution of CVs in the f, mc space through the EM gap.
     # LSS fspace and mc_range are the corresponding frequencies and chirp masses
     # for the rows and columns of N.
-    N, fspace, mspace = N_CVs_gwevol(pddat, rseed, outdir=outputdir, freqcolname='f_gw[Hz]', mass1colname='m1[Msun]', mass2colname='m2[Msun]')
+    N, fspace, mspace = N_CVs_gwevol(pddat, disk=disc, rseed=rseed, outdir=outputdir, freqcolname='f_gw[Hz]', mass1colname='m1[Msun]', mass2colname='m2[Msun]')
 
     # rejection sample this distribution
     # LSS pts will have shape (numsamp, 2) with columns f and mchirp
@@ -871,4 +872,4 @@ if __name__ == '__main__':
     combined_lat = np.hstack((cvgxy_lat, emgap_lat))
     combined_lon = np.hstack((cvgxy_lon, emgap_lon))
     cvgxy_emgap_blip_df = pd.DataFrame(data=np.vstack((combined_fs,combined_hs,combined_lat,combined_lon)).T,columns=blip_columns)
-    cvgxy_emgap_blip_df.to_csv(outputdir + f"dat_fullgxy_emgap_combined_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
+    cvgxy_emgap_blip_df.to_csv(outputdir + f"dat_fullgxy_emgap_combined_{disc}_rs{rseed}_nsamp{numsamp:.1e}_BLIP_final.txt", index=False,sep=' ',header=False)
