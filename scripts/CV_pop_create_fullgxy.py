@@ -367,7 +367,7 @@ def sample_fullgxy_population(mu_m1, sigma_m1, sigma_m2, rng, disk='thin'):
 
     # get the matching donor mass from the Knigge+2011 table
     m2 = calculate_m2_from_porb(porb)
-    m2_err = rngen.normal(loc=0, scale=sigma_m2, size=len(xgalcent))
+    m2_err = rng.normal(loc=0, scale=sigma_m2, size=len(xgalcent))
     m2 = m2 + m2_err
     Pala_reassign = np.zeros(len(xgalcent))
     scar_reassign = np.zeros(len(xgalcent))
